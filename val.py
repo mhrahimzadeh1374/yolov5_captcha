@@ -126,40 +126,38 @@ def run(
         compute_loss=None,
 ):
     # Initialize/load model and set device
-    """
     training = model is not None
     if training:  # called by train.py
         device, pt, jit, engine = next(model.parameters()).device, True, False, False  # get model device, PyTorch model
         half &= device.type != 'cpu'  # half precision only supported on CUDA
         model.half() if half else model.float()
     else:  # called directly
-    """
-    device = select_device(device, batch_size=batch_size)
+        device = select_device(device, batch_size=batch_size)
 
-    # Directories
-    #save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # increment run
-    #(save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
+        # Directories
+        save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # increment run
+        (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
-    # Load model
-    model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
-    stride, pt, jit, engine = model.stride, model.pt, model.jit, model.engine
-    imgsz = check_img_size(imgsz, s=stride)  # check image size
-    #half = model.fp16  # FP16 supported on limited backends with CUDA
-    if engine:
-        batch_size = model.batch_size
-    else:
-        device = model.device
-        if not (pt or jit):
-            batch_size = 1  # export.py models default to batch-size 1
-            LOGGER.info(f'Forcing --batch-size 1 square inference (1,3,{imgsz},{imgsz}) for non-PyTorch models')
+        # Load model
+        model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
+        stride, pt, jit, engine = model.stride, model.pt, model.jit, model.engine
+        imgsz = check_img_size(imgsz, s=stride)  # check image size
+        half = model.fp16  # FP16 supported on limited backends with CUDA
+        if engine:
+            batch_size = model.batch_size
+        else:
+            device = model.device
+            if not (pt or jit):
+                batch_size = 1  # export.py models default to batch-size 1
+                LOGGER.info(f'Forcing --batch-size 1 square inference (1,3,{imgsz},{imgsz}) for non-PyTorch models')
 
-    # Data
-    data = check_dataset(data)  # check
+        # Data
+        data = check_dataset(data)  # check
 
     # Configure
     model.eval()
     cuda = device.type != 'cpu'
-    #is_coco = isinstance(data.get('val'), str) and data['val'].endswith(f'coco{os.sep}val2017.txt')  # COCO dataset
+    is_coco = isinstance(data.get('val'), str) and data['val'].endswith(f'coco{os.sep}val2017.txt')  # COCO dataset
     nc = 1 if single_cls else int(data['nc'])  # number of classes
     iouv = torch.linspace(0.5, 0.95, 10, device=device)  # iou vector for mAP@0.5:0.95
     niou = iouv.numel()
@@ -184,7 +182,6 @@ def run(
                                        prefix=colorstr(f'{task}: '))[0]
 
     seen = 0
-    """
     confusion_matrix = ConfusionMatrix(nc=nc)
     names = model.names if hasattr(model, 'names') else model.module.names  # get class names
     if isinstance(names, (list, tuple)):  # old format
@@ -197,7 +194,6 @@ def run(
     jdict, stats, ap, ap_class = [], [], [], []
     callbacks.run('on_val_start')
     pbar = tqdm(dataloader, desc=s, bar_format=TQDM_BAR_FORMAT)  # progress bar
-    """
     for batch_i, (im, targets, paths, shapes) in enumerate(pbar):
         callbacks.run('on_val_batch_start')
         with dt[0]:
@@ -231,7 +227,6 @@ def run(
         # Metrics
         for si, pred in enumerate(preds):
             labels = targets[targets[:, 0] == si, 1:]
-            print(labels)
             nl, npr = labels.shape[0], pred.shape[0]  # number of labels, predictions
             path, shape = Path(paths[si]), shapes[si][0]
             correct = torch.zeros(npr, niou, dtype=torch.bool, device=device)  # init
@@ -267,15 +262,13 @@ def run(
                 save_one_json(predn, jdict, path, class_map)  # append to COCO-JSON dictionary
             callbacks.run('on_val_image_end', pred, predn, path, names, im[si])
 
-        """
         # Plot images
         if plots and batch_i < 3:
             plot_images(im, targets, paths, save_dir / f'val_batch{batch_i}_labels.jpg', names)  # labels
             plot_images(im, output_to_target(preds), paths, save_dir / f'val_batch{batch_i}_pred.jpg', names)  # pred
 
         callbacks.run('on_val_batch_end', batch_i, im, targets, paths, shapes, preds)
-        """
-    """
+
     # Compute metrics
     stats = [torch.cat(x, 0).cpu().numpy() for x in zip(*stats)]  # to numpy
     if len(stats) and stats[0].any():
@@ -341,7 +334,7 @@ def run(
     for i, c in enumerate(ap_class):
         maps[c] = ap[i]
     return (mp, mr, map50, map, *(loss.cpu() / len(dataloader)).tolist()), maps, t
-    """
+
 
 def parse_opt():
     parser = argparse.ArgumentParser()
@@ -376,7 +369,36 @@ def parse_opt():
 
 
 def main(opt):
+    check_requirements(exclude=('tensorboard', 'thop'))
+
+    if opt.task in ('train', 'val', 'test'):  # run normally
+        if opt.conf_thres > 0.001:  # https://github.com/ultralytics/yolov5/issues/1466
+            LOGGER.info(f'WARNING ⚠️ confidence threshold {opt.conf_thres} > 0.001 produces invalid results')
+        if opt.save_hybrid:
+            LOGGER.info('WARNING ⚠️ --save-hybrid will return high mAP from hybrid labels, not from predictions alone')
         run(**vars(opt))
+
+    else:
+        weights = opt.weights if isinstance(opt.weights, list) else [opt.weights]
+        opt.half = True  # FP16 for fastest results
+        if opt.task == 'speed':  # speed benchmarks
+            # python val.py --task speed --data coco.yaml --batch 1 --weights yolov5n.pt yolov5s.pt...
+            opt.conf_thres, opt.iou_thres, opt.save_json = 0.25, 0.45, False
+            for opt.weights in weights:
+                run(**vars(opt), plots=False)
+
+        elif opt.task == 'study':  # speed vs mAP benchmarks
+            # python val.py --task study --data coco.yaml --iou 0.7 --weights yolov5n.pt yolov5s.pt...
+            for opt.weights in weights:
+                f = f'study_{Path(opt.data).stem}_{Path(opt.weights).stem}.txt'  # filename to save to
+                x, y = list(range(256, 1536 + 128, 128)), []  # x axis (image sizes), y axis
+                for opt.imgsz in x:  # img-size
+                    LOGGER.info(f'\nRunning {f} --imgsz {opt.imgsz}...')
+                    r, _, t = run(**vars(opt), plots=False)
+                    y.append(r + t)  # results and times
+                np.savetxt(f, y, fmt='%10.4g')  # save
+            os.system('zip -r study.zip study_*.txt')
+            plot_val_study(x=x)  # plot
 
 
 if __name__ == "__main__":
